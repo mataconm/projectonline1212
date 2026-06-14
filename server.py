@@ -348,12 +348,14 @@ def add_note():
     notes.append(note)
     save_json(NOTES_FILE, notes)
     track_analytics("material_added", user, {"title": note["title"]})
+    add_notification(user, "Материал добавлен", f"Вы добавили материал: {note['title']}")
     return jsonify({"ok": True})
 
 
 @app.post("/admin/notes/delete")
 @rate_limit
 def admin_delete_note():
+    """Админ удаляет любой материал"""
     data = request.json or {}
     if not check_admin_payload(data):
         return jsonify({"error": "admin auth required"}), 403
@@ -363,41 +365,48 @@ def admin_delete_note():
         return jsonify({"error": "invalid index"}), 400
     if idx < 0 or idx >= len(notes):
         return jsonify({"error": "invalid index"}), 400
+    
+    deleted_title = notes[idx].get("title", "")
     notes.pop(idx)
     save_json(NOTES_FILE, notes)
-    track_analytics("material_deleted", data.get("admin_login"), {"index": idx})
+    track_analytics("material_deleted_admin", data.get("admin_login"), {"index": idx, "title": deleted_title})
     return jsonify({"ok": True})
 
 
 @app.post("/materials/delete")
 @rate_limit
 def delete_own_material():
+    """Ученик удаляет только СВОЙ материал"""
     data = request.json or {}
     username = data.get("username")
+    
+    if not username:
+        return jsonify({"error": "username required"}), 400
+    
     try:
         idx = int(data.get("index"))
     except:
         return jsonify({"error": "invalid index"}), 400
     
-    if not username:
-        return jsonify({"error": "username required"}), 400
-    
     if idx < 0 or idx >= len(notes):
         return jsonify({"error": "invalid index"}), 400
     
-    # Check that this is the user's own material
+    # ПРОВЕРКА: материал должен принадлежать этому ученику
     if notes[idx].get("user") != username:
         return jsonify({"error": "can only delete your own materials"}), 403
     
+    deleted_title = notes[idx].get("title", "")
     notes.pop(idx)
     save_json(NOTES_FILE, notes)
-    track_analytics("material_deleted_self", username, {"index": idx})
+    track_analytics("material_deleted_self", username, {"title": deleted_title})
+    add_notification(username, "Материал удален", f"Вы удалили: {deleted_title}")
     return jsonify({"ok": True})
 
 
 @app.post("/admin/materials/assign_group")
 @rate_limit
 def admin_assign_material_to_group():
+    """Админ назначает материал ученику или группе"""
     data = request.json or {}
     if not check_admin_payload(data):
         return jsonify({"error": "admin auth required"}), 403
@@ -413,11 +422,19 @@ def admin_assign_material_to_group():
     assigned_to = data.get("assigned_to", "")
     notes[idx]["assigned_to"] = assigned_to if assigned_to else None
     save_json(NOTES_FILE, notes)
-    track_analytics("material_assigned_group", data.get("admin_login"), {"to": assigned_to})
+    
+    material_title = notes[idx].get("title", "Без названия")
+    track_analytics("material_assigned_admin", data.get("admin_login"), {"to": assigned_to, "title": material_title})
     
     if assigned_to:
-        notify_group(assigned_to, "Новый материал", 
-                    f"Материал назначен вашему классу: {notes[idx].get('title', 'Без названия')}", "assignment")
+        # Уведомление для группы
+        if assigned_to in groups:
+            notify_group(assigned_to, "Новый материал", 
+                        f"Материал назначен вашему классу: {material_title}", "assignment")
+        # Уведомление для ученика
+        elif assigned_to in users:
+            add_notification(assigned_to, "Новый материал", 
+                           f"Вам назначен материал: {material_title}")
     
     return jsonify({"ok": True})
 
@@ -425,31 +442,43 @@ def admin_assign_material_to_group():
 @app.post("/materials/assign")
 @rate_limit
 def assign_own_material():
+    """Ученик назначает только СВОЙ материал другому ученику"""
     data = request.json or {}
     username = data.get("username")
+    assigned_to = data.get("assigned_to", "")
+    
+    if not username or not assigned_to:
+        return jsonify({"error": "username and assigned_to required"}), 400
+    
     try:
         idx = int(data.get("index"))
     except:
         return jsonify({"error": "invalid index"}), 400
     
-    if not username:
-        return jsonify({"error": "username required"}), 400
-    
     if idx < 0 or idx >= len(notes):
         return jsonify({"error": "invalid index"}), 400
     
-    # Check that this is the user's own material
+    # ПРОВЕРКА: материал должен принадлежать этому ученику
     if notes[idx].get("user") != username:
         return jsonify({"error": "can only assign your own materials"}), 403
     
-    assigned_to = data.get("assigned_to", "")
-    notes[idx]["assigned_to"] = assigned_to if assigned_to else None
-    save_json(NOTES_FILE, notes)
-    track_analytics("material_assigned_self", username, {"to": assigned_to})
+    # ПРОВЕРКА: назначаемый ученик должен существовать
+    if assigned_to not in users and assigned_to not in groups:
+        return jsonify({"error": "invalid student or group"}), 400
     
-    if assigned_to and assigned_to in users:
-        add_notification(assigned_to, "Новый материал", 
-                        f"Ученик {username} поделился материалом: {notes[idx].get('title', 'Без названия')}", "assignment")
+    notes[idx]["assigned_to"] = assigned_to
+    save_json(NOTES_FILE, notes)
+    
+    material_title = notes[idx].get("title", "Без названия")
+    track_analytics("material_assigned_self", username, {"to": assigned_to, "title": material_title})
+    
+    # Уведомление
+    if assigned_to in users:
+        add_notification(assigned_to, "Новый материал от ученика", 
+                       f"{username} поделился материалом: {material_title}")
+    elif assigned_to in groups:
+        notify_group(assigned_to, "Новый материал", 
+                    f"{username} поделился материалом: {material_title}")
     
     return jsonify({"ok": True})
 
@@ -477,7 +506,7 @@ def admin_edit_material():
         notes[idx]["image"] = data.get("image", "")
 
     save_json(NOTES_FILE, notes)
-    track_analytics("material_edited", data.get("admin_login"), {"index": idx})
+    track_analytics("material_edited_admin", data.get("admin_login"), {"index": idx})
     return jsonify({"ok": True})
 
 
@@ -550,32 +579,6 @@ def add_news():
     return jsonify({"ok": True})
 
 
-@app.post("/admin/news/assign_group")
-@rate_limit
-def admin_assign_news_to_group():
-    data = request.json or {}
-    if not check_admin_payload(data):
-        return jsonify({"error": "admin auth required"}), 403
-
-    try:
-        idx = int(data.get("index"))
-    except:
-        return jsonify({"error": "invalid index"}), 400
-
-    if idx < 0 or idx >= len(news):
-        return jsonify({"error": "invalid index"}), 400
-
-    assigned_to = data.get("assigned_to", "")
-    news[idx]["assigned_to"] = assigned_to if assigned_to else None
-    save_json(NEWS_FILE, news)
-    
-    if assigned_to:
-        notify_group(assigned_to, "Новая новость", 
-                    f"Новая новость для вашего класса: {news[idx].get('title', 'Без названия')}", "news")
-    
-    return jsonify({"ok": True})
-
-
 @app.post("/admin/news/delete")
 @rate_limit
 def admin_delete_news():
@@ -590,30 +593,7 @@ def admin_delete_news():
         return jsonify({"error": "invalid index"}), 400
     news.pop(idx)
     save_json(NEWS_FILE, news)
-    track_analytics("news_deleted", data.get("admin_login"), {"index": idx})
-    return jsonify({"ok": True})
-
-
-@app.post("/admin/news/update")
-@rate_limit
-def admin_update_news():
-    data = request.json or {}
-    if not check_admin_payload(data):
-        return jsonify({"error": "admin auth required"}), 403
-    try:
-        idx = int(data.get("index"))
-    except:
-        return jsonify({"error": "invalid index"}), 400
-    if idx < 0 or idx >= len(news):
-        return jsonify({"error": "invalid index"}), 400
-    if "title" in data:
-        news[idx]["title"] = data.get("title", news[idx].get("title", ""))
-    if "desc" in data:
-        news[idx]["desc"] = data.get("desc", news[idx].get("desc", ""))
-    if "image" in data:
-        news[idx]["image"] = data.get("image", news[idx].get("image", ""))
-    save_json(NEWS_FILE, news)
-    track_analytics("news_updated", data.get("admin_login"), {"index": idx})
+    track_analytics("news_deleted", data.get("admin_login"))
     return jsonify({"ok": True})
 
 
@@ -654,32 +634,6 @@ def add_guide():
     return jsonify({"ok": True})
 
 
-@app.post("/admin/guides/assign_group")
-@rate_limit
-def admin_assign_guide_to_group():
-    data = request.json or {}
-    if not check_admin_payload(data):
-        return jsonify({"error": "admin auth required"}), 403
-
-    try:
-        idx = int(data.get("index"))
-    except:
-        return jsonify({"error": "invalid index"}), 400
-
-    if idx < 0 or idx >= len(guides):
-        return jsonify({"error": "invalid index"}), 400
-
-    assigned_to = data.get("assigned_to", "")
-    guides[idx]["assigned_to"] = assigned_to if assigned_to else None
-    save_json(GUIDES_FILE, guides)
-    
-    if assigned_to:
-        notify_group(assigned_to, "Новое пособие", 
-                    f"Пособие назначено вашему классу: {guides[idx].get('title', 'Без названия')}", "assignment")
-    
-    return jsonify({"ok": True})
-
-
 @app.post("/admin/guides/delete")
 @rate_limit
 def admin_delete_guide():
@@ -694,63 +648,139 @@ def admin_delete_guide():
         return jsonify({"error": "invalid index"}), 400
     guides.pop(idx)
     save_json(GUIDES_FILE, guides)
-    track_analytics("guide_deleted", data.get("admin_login"), {"index": idx})
+    track_analytics("guide_deleted", data.get("admin_login"))
     return jsonify({"ok": True})
 
 
-@app.post("/admin/guides/update")
+# ===== TESTS =====
+@app.get("/tests")
 @rate_limit
-def admin_update_guide():
+def list_tests():
+    return jsonify(tests)
+
+
+@app.post("/tests/submit")
+@rate_limit
+def submit_test():
+    data = request.json or {}
+    user = data.get("user", "")
+    test_id = data.get("test_id", "")
+    answers = data.get("answers", [])
+    time_spent = data.get("time_spent", 0)
+    
+    test = next((t for t in tests if t.get("id") == test_id), None)
+    if not test:
+        return jsonify({"error": "test not found"}), 404
+    
+    score = 0
+    total = len(test.get("questions", []))
+    
+    for i, q in enumerate(test.get("questions", [])):
+        if i < len(answers):
+            user_answer = answers[i]
+            correct = q.get("answers", [])
+            
+            if q.get("type") == "multiple":
+                if isinstance(user_answer, list) and set(user_answer) == set(correct):
+                    score += 1
+            else:
+                if user_answer == correct[0]:
+                    score += 1
+    
+    percentage = int((score / total * 100) if total > 0 else 0)
+    
+    result = {
+        "user": user,
+        "test_id": test_id,
+        "score": score,
+        "total": total,
+        "percentage": percentage,
+        "time_spent": time_spent,
+        "timestamp": datetime.now().isoformat()
+    }
+    results.append(result)
+    save_json(RESULTS_FILE, results)
+    track_analytics("test_completed", user, {"score": score, "total": total})
+    
+    return jsonify(result)
+
+
+@app.post("/admin/tests/add_or_update")
+@rate_limit
+def admin_add_update_test():
     data = request.json or {}
     if not check_admin_payload(data):
         return jsonify({"error": "admin auth required"}), 403
-    try:
-        idx = int(data.get("index"))
-    except:
-        return jsonify({"error": "invalid index"}), 400
-    if idx < 0 or idx >= len(guides):
-        return jsonify({"error": "invalid index"}), 400
-    if "title" in data:
-        guides[idx]["title"] = data.get("title", guides[idx].get("title", ""))
-    if "desc" in data:
-        guides[idx]["desc"] = data.get("desc", guides[idx].get("desc", ""))
-    if "image" in data:
-        guides[idx]["image"] = data.get("image", guides[idx].get("image", ""))
-    save_json(GUIDES_FILE, guides)
-    track_analytics("guide_updated", data.get("admin_login"), {"index": idx})
+    
+    test = data.get("test", {})
+    test_id = test.get("id") or int(time.time() * 1000)
+    
+    existing = next((t for t in tests if t.get("id") == test_id), None)
+    if existing:
+        existing.update(test)
+    else:
+        test["id"] = test_id
+        test["created_at"] = datetime.now().isoformat()
+        tests.append(test)
+    
+    save_json(TESTS_FILE, tests)
+    track_analytics("test_created_or_updated", data.get("admin_login"), {"title": test.get("title")})
+    return jsonify({"ok": True})
+
+
+@app.post("/admin/tests/delete")
+@rate_limit
+def admin_delete_test():
+    data = request.json or {}
+    if not check_admin_payload(data):
+        return jsonify({"error": "admin auth required"}), 403
+    
+    test_id = data.get("id")
+    global tests
+    tests = [t for t in tests if t.get("id") != test_id]
+    save_json(TESTS_FILE, tests)
+    track_analytics("test_deleted", data.get("admin_login"))
     return jsonify({"ok": True})
 
 
 # ===== USERS =====
 @app.post("/admin/users/list")
 @rate_limit
-def admin_users_list():
-    payload = request.json or {}
-    if not check_admin_payload(payload):
+def admin_list_users():
+    data = request.json or {}
+    if not check_admin_payload(data):
         return jsonify({"error": "admin auth required"}), 403
-    return jsonify({k: {"role": v["role"], "group": v.get("group")} for k, v in users.items()})
+    return jsonify(users)
 
 
 @app.post("/admin/users/add_or_update")
 @rate_limit
-def admin_users_add_update():
+def admin_add_update_user():
     data = request.json or {}
     if not check_admin_payload(data):
         return jsonify({"error": "admin auth required"}), 403
-    login = data.get("login")
-    password = data.get("password")
+    
+    login = data.get("login", "")
+    password = data.get("password", "")
     role = data.get("role", "student")
-    group = data.get("group")
+    
     if not login:
         return jsonify({"error": "login required"}), 400
-    if password:
-        users[login] = {"password": hash_password(password), "role": role, "group": group}
+    
+    if login not in users and not password:
+        return jsonify({"error": "password required for new user"}), 400
+    
+    if login not in users:
+        users[login] = {
+            "password": hash_password(password),
+            "role": role,
+            "group": None
+        }
     else:
-        if login in users:
-            users[login]["role"] = role
-            users[login]["group"] = group
-        else:
-            return jsonify({"error": "password required for new user"}), 400
+        if password:
+            users[login]["password"] = hash_password(password)
+        users[login]["role"] = role
+    
     save_json(USERS_FILE, users)
     track_analytics("user_updated", data.get("admin_login"), {"user": login})
     return jsonify({"ok": True})
@@ -758,341 +788,67 @@ def admin_users_add_update():
 
 @app.post("/admin/users/delete")
 @rate_limit
-def admin_users_delete():
+def admin_delete_user():
     data = request.json or {}
     if not check_admin_payload(data):
         return jsonify({"error": "admin auth required"}), 403
-    login = data.get("login")
-    if not login or login not in users:
+    
+    login = data.get("login", "")
+    if login not in users:
         return jsonify({"error": "user not found"}), 404
-    if users[login].get("role") == "admin":
-        admins = [k for k, v in users.items() if v.get("role") == "admin"]
-        if len(admins) <= 1:
-            return jsonify({"error": "cannot delete the last admin"}), 400
-    users.pop(login, None)
+    
+    del users[login]
     save_json(USERS_FILE, users)
     track_analytics("user_deleted", data.get("admin_login"), {"user": login})
     return jsonify({"ok": True})
 
 
-# ===== SETTINGS =====
-@app.get("/admin/settings/theme")
+# ===== ADMIN ANALYTICS =====
+@app.post("/admin/analytics/stats")
 @rate_limit
-def get_theme():
-    return jsonify(settings)
-
-
-@app.post("/admin/settings/theme")
-@rate_limit
-def set_theme():
+def get_admin_stats():
     data = request.json or {}
     if not check_admin_payload(data):
         return jsonify({"error": "admin auth required"}), 403
-    theme = data.get("theme")
-    if theme not in ["light", "dark"]:
-        return jsonify({"error": "invalid theme"}), 400
-    settings["theme"] = theme
-    save_json(SETTINGS_FILE, settings)
-    track_analytics("theme_changed", data.get("admin_login"), {"theme": theme})
-    return jsonify({"ok": True})
-
-
-# ===== CALENDAR EVENTS =====
-@app.get("/calendar/<year>/<month>")
-@rate_limit
-def get_calendar_events(year, month):
-    try:
-        year = int(year)
-        month = int(month)
-    except:
-        return jsonify({"error": "invalid year/month"}), 400
     
-    filtered_events = [e for e in events if e.get("year") == year and e.get("month") == month]
-    return jsonify(filtered_events)
-
-
-@app.post("/calendar/add_event")
-@rate_limit
-def add_calendar_event():
-    data = request.json or {}
-    user = data.get("user", "")
-    
-    event = {
-        "title": data.get("title", ""),
-        "desc": data.get("desc", ""),
-        "day": data.get("day"),
-        "month": data.get("month"),
-        "year": data.get("year"),
-        "user": user,
-        "type": data.get("type", "event"),
-        "created_at": datetime.now().isoformat(),
-        "id": int(time.time() * 1000)
+    stats = {
+        "users": len([u for u in users.values() if u.get("role") == "student"]),
+        "tests": len(tests),
+        "completed_tests": len(results),
+        "materials": len(notes),
+        "average_score": int(sum(r.get("percentage", 0) for r in results) / len(results)) if results else 0
     }
-    events.append(event)
-    save_json(EVENTS_FILE, events)
-    track_analytics("calendar_event_added", user, {"date": f"{event['day']}.{event['month']}.{event['year']}"})
-    return jsonify({"ok": True, "event": event})
-
-
-@app.post("/admin/calendar/add_event_group")
-@rate_limit
-def add_calendar_event_group():
-    data = request.json or {}
-    if not check_admin_payload(data):
-        return jsonify({"error": "admin auth required"}), 403
-    
-    group = data.get("group")
-    event = {
-        "title": data.get("title", ""),
-        "desc": data.get("desc", ""),
-        "day": data.get("day"),
-        "month": data.get("month"),
-        "year": data.get("year"),
-        "group": group,
-        "type": data.get("type", "assignment"),
-        "created_at": datetime.now().isoformat(),
-        "id": int(time.time() * 1000)
-    }
-    events.append(event)
-    save_json(EVENTS_FILE, events)
-    
-    if group:
-        notify_group(group, "Событие в календаре", 
-                    f"Новое событие: {event['title']} на {event['day']}.{event['month']}.{event['year']}", "event")
-    
-    track_analytics("calendar_event_added_group", data.get("admin_login"), {"group": group})
-    return jsonify({"ok": True, "event": event})
-
-
-@app.post("/calendar/delete_event/<int:event_id>")
-@rate_limit
-def delete_calendar_event(event_id):
-    global events
-    events = [e for e in events if e.get("id") != event_id]
-    save_json(EVENTS_FILE, events)
-    return jsonify({"ok": True})
-
-
-# ===== TESTS =====
-@app.get("/tests")
-@rate_limit
-def get_tests_public():
-    safe = []
-    for t in tests:
-        tcopy = {k: v for k, v in t.items() if k != 'questions'}
-        qs = []
-        for q in t.get('questions', []):
-            if not isinstance(q, dict):
-                qtext = str(q) if q is not None else ''
-                qcopy = {'q': qtext, 'choices': [], 'type': 'text', 'image': '', 'answers': []}
-            else:
-                qtext = q.get('q') or q.get('question') or q.get('text') or ''
-                qtype = q.get('type', 'single')
-                image = q.get('image', '')
-                choices_raw = q.get('choices', [])
-
-                if choices_raw is None:
-                    choices = []
-                elif isinstance(choices_raw, list):
-                    normalized = []
-                    for c in choices_raw:
-                        if c is None:
-                            continue
-                        if isinstance(c, dict):
-                            normalized.append(str(c.get('text') or c.get('label') or c.get('choice') or json.dumps(c,
-                                                                                                                     ensure_ascii=False)))
-                        else:
-                            normalized.append(str(c))
-                    choices = normalized
-                else:
-                    if isinstance(choices_raw, dict):
-                        choices = [str(choices_raw.get('text') or choices_raw.get('label') or json.dumps(choices_raw,
-                                                                                                           ensure_ascii=False))]
-                    else:
-                        choices = [str(choices_raw)]
-
-                answers = q.get('answers', [])
-                if not isinstance(answers, list):
-                    answers = [answers] if answers else []
-
-                qcopy = {'q': qtext, 'choices': choices, 'type': qtype, 'image': image, 'answers': answers}
-            qs.append(qcopy)
-        tcopy['questions'] = qs
-        safe.append(tcopy)
-    return jsonify(safe)
-
-
-@app.post("/tests/submit")
-@rate_limit
-def submit_test():
-    data = request.json or {}
-    test_id = data.get('test_id')
-    answers = data.get('answers', [])
-    user = data.get('user', 'unknown')
-    time_spent = data.get('time_spent', 0)
-    
-    t = next((x for x in tests if x.get('id') == test_id), None)
-    if not t:
-        return jsonify({'error': 'test not found'}), 404
-
-    correct = 0
-    details = []
-
-    for i, q in enumerate(t.get('questions', [])):
-        user_answer = answers[i] if i < len(answers) else None
-        correct_answers = q.get('answers', q.get('correct'))
-
-        if not isinstance(correct_answers, list):
-            correct_answers = [correct_answers] if correct_answers is not None else []
-
-        is_correct = False
-        if q.get('type') == 'multiple':
-            if isinstance(user_answer, list):
-                user_answer_set = set(user_answer)
-                correct_set = set(correct_answers)
-                is_correct = user_answer_set == correct_set
-        else:
-            is_correct = user_answer in correct_answers
-
-        if is_correct:
-            correct += 1
-
-        details.append({
-            'question': i + 1,
-            'correct': is_correct,
-            'user_answer': user_answer,
-            'correct_answer': correct_answers
-        })
-
-    percentage = round((correct / len(t.get('questions', []))) * 100) if len(t.get('questions', [])) > 0 else 0
-    
-    score = {
-        'user': user,
-        'test_id': test_id,
-        'score': correct,
-        'total': len(t.get('questions', [])),
-        'percentage': percentage,
-        'details': details,
-        'time_spent': time_spent,
-        'completed_at': datetime.now().isoformat()
-    }
-    results.append(score)
-    save_json(RESULTS_FILE, results)
-    track_analytics("test_submitted", user, {"test_id": test_id, "score": percentage})
-    
-    return jsonify(score)
-
-
-@app.post("/admin/tests/list")
-@rate_limit
-def admin_tests_list():
-    data = request.json or {}
-    if not check_admin_payload(data):
-        return jsonify({"error": "admin auth required"}), 403
-    return jsonify(tests)
-
-
-@app.post("/admin/tests/add_or_update")
-@rate_limit
-def admin_tests_add_update():
-    data = request.json or {}
-    if not check_admin_payload(data):
-        return jsonify({"error": "admin auth required"}), 403
-    test = data.get('test')
-    if not test or 'title' not in test or 'questions' not in test:
-        return jsonify({'error': 'invalid test structure'}), 400
-    
-    assigned_to = test.get('assigned_to')
-    
-    if 'id' not in test:
-        test['id'] = (max([t.get('id', 0) for t in tests]) + 1) if tests else 1
-        test['assigned_to'] = assigned_to
-        tests.append(test)
-    else:
-        for i, t in enumerate(tests):
-            if t.get('id') == test.get('id'):
-                tests[i] = test
-                break
-        else:
-            test['assigned_to'] = assigned_to
-            tests.append(test)
-    save_json(TESTS_FILE, tests)
-    
-    if assigned_to:
-        notify_group(assigned_to, "Новый тест", 
-                    f"Вашему классу назначен тест: {test.get('title', 'Без названия')}", "assignment")
-    
-    track_analytics("test_updated", data.get("admin_login"), {"test_id": test.get('id')})
-    return jsonify({'ok': True, 'id': test['id']})
-
-
-@app.post("/admin/tests/delete")
-@rate_limit
-def admin_tests_delete():
-    data = request.json or {}
-    if not check_admin_payload(data):
-        return jsonify({"error": "admin auth required"}), 403
-    tid = data.get('id')
-    for i, t in enumerate(tests):
-        if t.get('id') == tid:
-            tests.pop(i)
-            save_json(TESTS_FILE, tests)
-            track_analytics("test_deleted", data.get("admin_login"), {"test_id": tid})
-            return jsonify({'ok': True})
-    return jsonify({'error': 'not found'}), 404
+    return jsonify(stats)
 
 
 @app.post("/admin/results")
 @rate_limit
-def admin_results():
+def get_admin_results():
     data = request.json or {}
     if not check_admin_payload(data):
         return jsonify({"error": "admin auth required"}), 403
     return jsonify(results)
 
 
-# ===== ANALYTICS & STATISTICS =====
-@app.post("/admin/analytics/stats")
+@app.post("/admin/settings/theme")
 @rate_limit
-def get_analytics():
+def admin_set_theme():
     data = request.json or {}
     if not check_admin_payload(data):
         return jsonify({"error": "admin auth required"}), 403
     
-    user_count = len(users)
-    test_count = len(tests)
-    completed_tests = len(results)
-    avg_score = round(sum([r.get('percentage', 0) for r in results]) / len(results)) if results else 0
-    
-    stats = {
-        "version": "4.0.0",
-        "users": user_count,
-        "groups": len(groups),
-        "tests": test_count,
-        "completed_tests": completed_tests,
-        "average_score": avg_score,
-        "materials": len(notes),
-        "news": len(news),
-        "guides": len(guides),
-        "calendar_events": len(events),
-        "events_count": len(analytics.get("events", []))
-    }
-    
-    return jsonify(stats)
+    theme = data.get("theme", "light")
+    settings["theme"] = theme
+    save_json(SETTINGS_FILE, settings)
+    track_analytics("theme_changed", data.get("admin_login"), {"theme": theme})
+    return jsonify({"ok": True})
 
 
-@app.post("/admin/analytics/events")
+@app.get("/settings")
 @rate_limit
-def get_events():
-    data = request.json or {}
-    if not check_admin_payload(data):
-        return jsonify({"error": "admin auth required"}), 403
-    
-    limit = data.get("limit", 50)
-    events_list = analytics.get("events", [])[-limit:]
-    return jsonify(events_list)
+def get_settings():
+    return jsonify(settings)
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+    app.run(debug=False, host="0.0.0.0", port=5000)
