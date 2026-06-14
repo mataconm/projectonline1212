@@ -369,6 +369,32 @@ def admin_delete_note():
     return jsonify({"ok": True})
 
 
+@app.post("/materials/delete")
+@rate_limit
+def delete_own_material():
+    data = request.json or {}
+    username = data.get("username")
+    try:
+        idx = int(data.get("index"))
+    except:
+        return jsonify({"error": "invalid index"}), 400
+    
+    if not username:
+        return jsonify({"error": "username required"}), 400
+    
+    if idx < 0 or idx >= len(notes):
+        return jsonify({"error": "invalid index"}), 400
+    
+    # Check that this is the user's own material
+    if notes[idx].get("user") != username:
+        return jsonify({"error": "can only delete your own materials"}), 403
+    
+    notes.pop(idx)
+    save_json(NOTES_FILE, notes)
+    track_analytics("material_deleted_self", username, {"index": idx})
+    return jsonify({"ok": True})
+
+
 @app.post("/admin/materials/assign_group")
 @rate_limit
 def admin_assign_material_to_group():
@@ -392,6 +418,38 @@ def admin_assign_material_to_group():
     if assigned_to:
         notify_group(assigned_to, "Новый материал", 
                     f"Материал назначен вашему классу: {notes[idx].get('title', 'Без названия')}", "assignment")
+    
+    return jsonify({"ok": True})
+
+
+@app.post("/materials/assign")
+@rate_limit
+def assign_own_material():
+    data = request.json or {}
+    username = data.get("username")
+    try:
+        idx = int(data.get("index"))
+    except:
+        return jsonify({"error": "invalid index"}), 400
+    
+    if not username:
+        return jsonify({"error": "username required"}), 400
+    
+    if idx < 0 or idx >= len(notes):
+        return jsonify({"error": "invalid index"}), 400
+    
+    # Check that this is the user's own material
+    if notes[idx].get("user") != username:
+        return jsonify({"error": "can only assign your own materials"}), 403
+    
+    assigned_to = data.get("assigned_to", "")
+    notes[idx]["assigned_to"] = assigned_to if assigned_to else None
+    save_json(NOTES_FILE, notes)
+    track_analytics("material_assigned_self", username, {"to": assigned_to})
+    
+    if assigned_to and assigned_to in users:
+        add_notification(assigned_to, "Новый материал", 
+                        f"Ученик {username} поделился материалом: {notes[idx].get('title', 'Без названия')}", "assignment")
     
     return jsonify({"ok": True})
 
@@ -842,14 +900,14 @@ def get_tests_public():
                             continue
                         if isinstance(c, dict):
                             normalized.append(str(c.get('text') or c.get('label') or c.get('choice') or json.dumps(c,
-                                                                                                                    ensure_ascii=False)))
+                                                                                                                     ensure_ascii=False)))
                         else:
                             normalized.append(str(c))
                     choices = normalized
                 else:
                     if isinstance(choices_raw, dict):
                         choices = [str(choices_raw.get('text') or choices_raw.get('label') or json.dumps(choices_raw,
-                                                                                                          ensure_ascii=False))]
+                                                                                                           ensure_ascii=False))]
                     else:
                         choices = [str(choices_raw)]
 
