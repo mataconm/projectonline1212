@@ -1,0 +1,12 @@
+{
+  "version": "4.5.0",
+  "stats": {},
+  "events": [
+    {
+      "type": "login_success",
+      "user": "admin",
+      "timestamp": "2026-06-14T18:11:50.099457",
+      "details": {}
+    }
+  ]
+}
